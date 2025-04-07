@@ -1,0 +1,33 @@
+# Pulumi state and secrets
+*.state
+*.stack
+pulumi.stack.json
+pulumi.<stack-name>.state
+pulumi.<stack-name>.json
+*.tfstate
+*.tfstate.backup
+.pulumi/
+*.tfplan
+
+# Python dependencies
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+venv/
+.Python
+
+# Docker & build artifacts
+Dockerfile
+.dockerignore
+*.log
+*.bak
+
+# IDE/Editor specific files
+.vscode/
+.idea/
+*.swp
+
+# Pulumi SDKs and binaries
+pulumi-bin/

@@ -5,11 +5,13 @@ import pulumi_esc_sdk as esc
 import os
 
 from pulumi import Config, export
+from pulumi_azure_native.resources import ResourceGroup, get_resource_group
 
 # === Load configuration ===
 config = Config()
 env = pulumi.get_stack()
 appname = pulumi.get_project()
+project_name = appname  # for ESC
 
 location = config.require("location")
 key_vault_name = config.require("key_vault_name")
@@ -20,19 +22,45 @@ vm_offer = config.require("vm_offer")
 vm_sku = config.require("vm_sku")
 vm_version = config.require("vm_version")
 vm_name = config.require("vm_name")
+org_name = config.require("org_name")
 
 # === Set up Pulumi ESC client ===
 access_token = os.getenv("PULUMI_ACCESS_TOKEN")
-org_name = os.getenv("PULUMI_ORG")
-esc_env_name = f"{appname}-{env}-secrets"
+if not access_token:
+    raise Exception("PULUMI_ACCESS_TOKEN environment variable is not set.")
 
+esc_env_name = f"{appname}-{env}-secrets"
 client = esc.EscClient(esc.Configuration(access_token=access_token))
 
-# Create ESC environment (safe to wrap in try/except)
+# === Create or Get Resource Group ===
+def create_or_get_rg(name):
+    try:
+        existing_rg = get_resource_group(resource_group_name=name)
+        return ResourceGroup.get("existingResourceGroup", id=existing_rg.id)
+    except Exception:
+        return ResourceGroup("resourceGroup",
+            location=location,
+            resource_group_name=name
+        )
+
+resource_group = create_or_get_rg(resource_group_name)
+
+# === Create or Update ESC environment ===
+env_def = esc.EnvironmentDefinition(
+    values=esc.EnvironmentDefinitionValues(
+        additional_properties={}  # initialized empty; will update later
+    )
+)
+
+# Try to create the ESC environment, fallback to update if it exists
 try:
-    client.create_environment(org_name, esc_env_name)
-except Exception as e:
-    print(f"ESC environment may already exist: {e}")
+    client.create_environment(org_name, project_name, esc_env_name)
+    print(f"ESC environment '{esc_env_name}' created.")
+except esc.ApiException as e:
+    if e.status == 409:
+        print(f"ESC environment '{esc_env_name}' already exists. Updating...")
+    else:
+        raise
 
 # === Get secrets from Azure Key Vault ===
 key_vault_id = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group_name}/providers/Microsoft.KeyVault/vaults/{key_vault_name}"
@@ -40,29 +68,18 @@ key_vault_id = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group
 admin_username_secret = azure.keyvault.get_secret(name="adminUsername", key_vault_id=key_vault_id)
 admin_password_secret = azure.keyvault.get_secret(name="adminPassword", key_vault_id=key_vault_id)
 
-# Extract plain secret values
 admin_username = admin_username_secret.value
 admin_password = admin_password_secret.value
 
 # === Upload secrets to ESC ===
-env_def = esc.EnvironmentDefinition(
-    values=esc.EnvironmentDefinitionValues(
-        additional_properties={
-            "adminUsername": {"fn::secret": admin_username},
-            "adminPassword": {"fn::secret": admin_password},
-        }
-    )
-)
+env_def.values.additional_properties = {
+    "adminUsername": {"fn::secret": admin_username},
+    "adminPassword": {"fn::secret": admin_password},
+}
 
-client.update_environment(org_name, esc_env_name, env_def)
+client.update_environment(org_name, project_name, esc_env_name, env_def)
 
-# === Create Resource Group ===
-resource_group = azure_native.resources.ResourceGroup("resourceGroup",
-    location=location,
-    resource_group_name=f"{appname}-{env}-rg"
-)
-
-# === Create Networking + VM ===
+# === Create Networking ===
 virtual_network = azure_native.network.VirtualNetwork("virtualNetwork",
     address_space={"addressPrefixes": ["10.0.0.0/16"]},
     location=location,
@@ -93,9 +110,7 @@ network_interface = azure_native.network.NetworkInterface("networkInterface-" + 
     }]
 )
 
-# cloud_init_script_base64 is assumed to be already defined, else define it
-cloud_init_script_base64 = ""
-
+# === Create VM ===
 vm = azure.compute.LinuxVirtualMachine(f"{vm_name}-{env}",
     resource_group_name=resource_group.name,
     location=location,
@@ -115,10 +130,12 @@ vm = azure.compute.LinuxVirtualMachine(f"{vm_name}-{env}",
         sku=vm_sku,
         version=vm_version,
     ),
-    custom_data=cloud_init_script_base64,
     tags={"Environment": env}
 )
 
 # === Export Outputs ===
+public_ip_address = public_ip.ip_address.apply(lambda ip: ip)  # This resolves the IP address value
+
 export("resource_group_name", resource_group.name)
 export("vm_name", vm.name)
+export("vm_ip_address", public_ip_address)  # Correct export of IP address
