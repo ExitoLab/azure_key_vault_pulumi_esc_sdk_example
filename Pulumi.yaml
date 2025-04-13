@@ -1,6 +1,6 @@
 name: azure_key_vault_pulumi_esc_sdk_example
 runtime: python
-description: How to receive secrets from azure key vault
+description: How to receive secrets from azure key vault and Pulumi ESC
 config:
   pulumi:tags:
     value:
